@@ -138,10 +138,10 @@ const load = () => {
         path={Types.stringToPath('/keybase')}
         progress="loaded"
         routePath={I.List([])}
-        stillItems={[
-          Types.stringToPath('/keybase/private'),
-          Types.stringToPath('/keybase/public'),
-          Types.stringToPath('/keybase/team'),
+        items={[
+          {rowType: 'still', path: Types.stringToPath('/keybase/private'), name: 'private'},
+          {rowType: 'still', path: Types.stringToPath('/keybase/public'), name: 'public'},
+          {rowType: 'still', path: Types.stringToPath('/keybase/team'), name: 'team'},
         ]}
         editingItems={[]}
       />
