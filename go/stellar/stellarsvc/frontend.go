@@ -677,8 +677,175 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 		return res, err
 	}
 
-	// Not implemented. CORE-7871
-	return res, fmt.Errorf("BuildPaymentLocal not implemented")
+	readyChecklist := struct {
+		from       bool
+		to         bool
+		amount     bool
+		secretNote bool
+		publicMemo bool
+	}{}
+	uis := libkb.UIs{
+		IdentifyUI: s.uiSource.IdentifyUI(s.G(), arg.SessionID),
+	}
+
+	// -------------------- from --------------------
+
+	owns, err := UserOwnsAccountWickedFast(arg.From)
+	if err != nil || !owns {
+		s.G().Log.CDebugf(ctx, "UserOwnsAccountWickedFast -> owns:%v err:%v", owns, err)
+		res.Banners = append(res.Banners, stellar1.SendBannerLocal{
+			Level:   "error",
+			Message: "Could not find source account.",
+		})
+	} else {
+		if arg.FromSeqno == "" {
+			readyChecklist.from = true
+		} else {
+			// Check that the seqno of the account matches the caller's expectation.
+			// xxx TODO the wicked fast portion of this should bust whenever there's a new tx.
+			seqno, err := AccountSeqnoWickedFast(arg.From)
+			switch {
+			case err != nil:
+				s.G().Log.CDebugf(ctx, "AccountSeqnoWickedFast -> err:%v", err)
+				res.Banners = append(res.Banners, stellar1.SendBannerLocal{
+					Level:   "error",
+					Message: "Could not get seqno for source account.",
+				})
+			case seqno != arg.FromSeqno:
+				s.G().Log.CDebugf(ctx, "AccountSeqnoWickedFast -> err:%v", err)
+				res.Banners = append(res.Banners, stellar1.SendBannerLocal{
+					Level:   "error",
+					Message: "Activity on account since initiating send. Take another look at account history.",
+				})
+			default:
+				readyChecklist.from = true
+			}
+		}
+	}
+	// xxx TODO arg.From
+	// xxx TODO arg.FromSeqno
+
+	// -------------------- to --------------------
+
+	var skipRecipient bool
+	var minAmountXLM string
+	if arg.ToIsAccountID {
+		_, err := libkb.ParseStellarAccountID(arg.To)
+		if err != nil {
+			res.ToErrMsg = err.Error()
+			skipRecipient = true
+		} else {
+			readyChecklist.to = true
+		}
+	}
+	if !skipRecipient {
+		// xxx Is this call too slow? Will it do identifies?
+		recipient, err := stellar.LookupRecipient(s.mctx(ctx).WithUIs(uis), stellarcommon.RecipientInput(arg.To))
+		if err != nil {
+			s.G().Log.CDebugf(ctx, "error with recipient field %v: %v", arg.To, err)
+			res.ToErrMsg = "recipient not found"
+			skipRecipient = true
+		} else {
+			readyChecklist.to = true
+			addMinBanner := func(them, amount string) {
+				res.Banners = append(res.Banners, stellar1.SendBannerLocal{
+					Level:   "info",
+					Message: fmt.Sprintf("Because it's %s first transaction, you must send at least %s XLM.", them, amount),
+				})
+			}
+			bannerThem := "their"
+			if recipient.User != nil {
+				bannerThem = fmt.Sprintf("%s's", recipient.User.GetNormalizedName())
+			}
+			if recipient.AccountID == nil {
+				// Sending a payment to a target with no account. (relay)
+				minAmountXLM = "2.01"
+				addMinBanner(bannerThem, minAmountXLM)
+			} else {
+				isFunded, err := stellar.IsAccountFundedFastAsCanBe(*recipient.AccountID)
+				if err != nil {
+					s.G().Log.CDebugf(ctx, "error checking recipient funding status %v: %v", *recipient.AccountID, err)
+				} else if !isFunded {
+					// Sending to a non-funded stellar account.
+					minAmountXLM = "1"
+					addMinBanner(bannerThem, minAmountXLM)
+				}
+			}
+		}
+	}
+
+	// -------------------- amount + asset --------------------
+
+	var amountOfAsset string // can remain "" if validations fail
+	asset := stelar1.AssetNative()
+
+	if arg.Currency != nil && arg.Asset == nil {
+		// Amount is of currency.
+		if arg.Amount == "" {
+			FUDGE() // but still get exchange rate for 0!
+		}
+		_, err = stellaramount.ParseInt64(arg.Amount)
+		if err != nil {
+			FUDGE()
+		}
+		xrate, err := GetOutsideExchangeRateFast(*arg.Currency)
+		if err != nil {
+			s.G().Log.CDebugf(ctx, "error getting exchange rate for %v: %v", arg.Currency, err)
+			res.amountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
+		} else {
+			xlmAmount, err := stellar.ConvertLocalToXLM(arg.Amount, xrate)
+			if err != nil {
+				s.G().Log.CDebugf(ctx, "error getting converting: %v", err)
+				res.amountErrMsg = fmt.Sprintf("Could not convert to XLM", arg.Currency.String())
+			} else {
+				amountOfAsset = xlmAmount
+				// xxx TODO you were here...
+			}
+		}
+		// xxx TODO branch
+	} else if arg.Currency == nil {
+		// Amount is of asset.
+		if arg.Asset != nil {
+			asset = *arg.Asset
+		}
+		// xxx TODO branch
+	} else {
+		// This is a caller error, so it's ok error out the whole RPC.
+		return res, fmt.Errorf("Only one of Asset and Currency parameters should be filled")
+	}
+
+	if haveAmount {
+		if !asset.IsNativeXLM() {
+			return res, fmt.Errorf("sending non-XLM assets is not supported")
+		}
+		// xxx TODO check that sender has enough asset
+		// xxx TODO check that recipient accepts asset
+	}
+	// xxx TODO arg.Amount
+	// xxx TODO arg.Currency
+	// xxx TODO arg.Asset
+	// xxx TODO return worth
+
+	// -------------------- note + memo --------------------
+
+	if len(arg.SecretNote) <= 500 {
+		readyChecklist.secretNote = true
+	} else {
+		res.SecretNoteErrMsg = "Note is too long."
+	}
+
+	if len(arg.PublicMemo) <= 28 {
+		readyChecklist.publicMemo = true
+	} else {
+		res.PublicMemoErrMsg = "Memo is too long."
+	}
+
+	// -------------------- end --------------------
+
+	if readyChecklist.from && readyChecklist.to && readyChecklist.amount && readyChecklist.secretNote && readyChecklist.publicMemo {
+		res.ReadyToSend = true
+	}
+	return res, nil
 }
 
 func (s *Server) SendPaymentLocal(ctx context.Context, arg stellar1.SendPaymentLocalArg) (res stellar1.SendPaymentResLocal, err error) {
