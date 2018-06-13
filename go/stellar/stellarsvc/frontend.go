@@ -800,7 +800,7 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 
 	// -------------------- amount + asset --------------------
 
-	amountX := s.buildPaymentAmountHelper(ctx, buildPaymentAmountInput{
+	amountX := s.buildPaymentAmountHelper(ctx, bpc, buildPaymentAmountArg{
 		Amount:   arg.Amount,
 		Currency: arg.Currency,
 		Asset:    arg.Asset,
@@ -876,14 +876,14 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 	return res, nil
 }
 
-type buildPaymentAmountInput struct {
+type buildPaymentAmountArg struct {
 	// See buildPaymentLocal in avdl from which these args are copied.
 	Amount   string
 	Currency *stellar1.OutsideCurrencyCode
 	Asset    *stellar1.Asset
 }
 
-type buildPaymentAmountOutput struct {
+type buildPaymentAmountResult struct {
 	haveAmount       bool // whether `amountOfAsset` and `asset` are valid
 	amountOfAsset    string
 	asset            stellar1.Asset
@@ -894,46 +894,48 @@ type buildPaymentAmountOutput struct {
 	rate *stellar1.OutsideExchangeRate
 }
 
-func (s *Server) buildPaymentAmountHelper(ctx context.Context, in buildPaymentAmountInput) (out buildPaymentAmountOutput) {
-	stellar.ParseDecimalStrict
-	TODO()
-
-	var amountOfAsset string // can remain "" if validations fail
-	asset := stellar1.AssetNative()
-
-	if arg.Currency != nil && arg.Asset == nil {
-		// Amount is of currency.
+func (s *Server) buildPaymentAmountHelper(ctx context.Context, bpc BuildPaymentCache, arg buildPaymentAmountArg) (res buildPaymentAmountResult) {
+	res.asset = stellar1.AssetNative()
+	switch {
+	case arg.Currency != nil && arg.Asset == nil:
+		// Amount is of outside currency.
+		convertAmountOutside := "0"
 		if arg.Amount == "" {
-			FUDGE() // but still get exchange rate for 0!
-		}
-		_, err := stellar.ParseDecimalStrict(arg.Amount)
-		if err != nil {
-			FUDGE()
-		}
-		xrate, err := bpc.GetOutsideExchangeRate(*arg.Currency)
-		if err != nil {
-			s.G().Log.CDebugf(ctx, "error getting exchange rate for %v: %v", arg.Currency, err)
-			res.AmountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
+			// No amount given. Still convert for 0.
 		} else {
-			xlmAmount, err := stellar.ConvertOutsideToXLM(arg.Amount, xrate)
-			if err != nil {
-				s.G().Log.CDebugf(ctx, "error getting converting: %v", err)
-				res.AmountErrMsg = fmt.Sprintf("Could not convert to XLM", arg.Currency.String())
-			} else {
-				amountOfAsset = xlmAmount
-				res.WorthDescription = fmt.Sprintf("This is *%s XLM*", xlmAmountFormatted)
-				res.WorthInfo = fmt.Sprintf("$1 = %s\nSource: coinmarketcap.com", rateInvertFormatted)
-				// xxx TODO you were here...
+			amount, err := stellar.ParseDecimalStrict(arg.Amount)
+			if err != nil || amount.Sign() < 0 {
+				// Invalid or negative amount.
+				res.amountErrMsg = "Invalid amount."
+				return res
+			}
+			if amount.Sign() > 0 {
+				convertAmountOutside = arg.Amount
 			}
 		}
-		// xxx TODO branch
-	} else if arg.Currency == nil {
-		// Amount is of asset.
-		if arg.Asset != nil {
-			asset = *arg.Asset
+		xrate, err := bpc.GetOutsideExchangeRate(s.mctx(ctx), *arg.Currency)
+		if err != nil {
+			s.G().Log.CDebugf(ctx, "error getting exchange rate for %v: %v", arg.Currency, err)
+			res.amountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
+			return res
 		}
-		// xxx TODO branch
-	} else {
+		res.rate = &xrate
+		xlmAmount, err := stellar.ConvertOutsideToXLM(convertAmountOutside, xrate)
+		if err != nil {
+			s.G().Log.CDebugf(ctx, "error getting converting: %v", err)
+			res.amountErrMsg = fmt.Sprintf("Could not convert to XLM")
+			return res
+		}
+		res.amountOfAsset = xlmAmount
+		if convertAmountOutside != "0" {
+			res.haveAmount = true
+		}
+		res.worthDescription = fmt.Sprintf("This is *%s XLM*", xlmAmountFormatted)
+		res.worthInfo = fmt.Sprintf("$1 = %s\nSource: coinmarketcap.com", rateInvertFormatted)
+	case arg.Currency == nil:
+		// Amount is of asset.
+		TODO(branch)
+	default:
 		// This is a caller error, so it's ok error out the whole RPC.
 		return res, fmt.Errorf("Only one of Asset and Currency parameters should be filled")
 	}

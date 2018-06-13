@@ -35,7 +35,7 @@ func ConvertOutsideToXLM(outsideAmount string, rate stellar1.OutsideExchangeRate
 	if err != nil {
 		return "", err
 	}
-	acc, err := parseDecimalStrict(outsideAmount)
+	acc, err := ParseDecimalStrict(outsideAmount)
 	if err != nil {
 		return "", fmt.Errorf("parsing amount to convert: %q", outsideAmount)
 	}
@@ -70,7 +70,7 @@ func CompareAmounts(amount1, amount2 string) (int, error) {
 }
 
 func parseExchangeRate(rate string) (*big.Rat, error) {
-	rateRat, err := parseDecimalStrict(rate)
+	rateRat, err := ParseDecimalStrict(rate)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing exchange rate: %q", rate)
 	}
@@ -94,7 +94,7 @@ var decimalStrictRE = regexp.MustCompile(`^-?((\d+\.?\d*)|(\d*\.?\d+))$`)
 // parseDecimalStrict parses a decimal number into a big rational.
 // Used instead of big.Rat.SetString because the latter accepts
 // additional formats like "1/2" and "1e10".
-func parseDecimalStrict(s string) (*big.Rat, error) {
+func ParseDecimalStrict(s string) (*big.Rat, error) {
 	if s == "" {
 		return nil, fmt.Errorf("expected decimal number but found empty string")
 	}
