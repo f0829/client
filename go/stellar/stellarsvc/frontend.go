@@ -17,7 +17,6 @@ import (
 	"github.com/keybase/client/go/stellar/relays"
 	"github.com/keybase/client/go/stellar/remote"
 	"github.com/keybase/client/go/stellar/stellarcommon"
-	"github.com/stellar/go/amount"
 )
 
 const WorthCurrencyErrorCode = "ERR"
@@ -670,15 +669,16 @@ func (s *Server) GetSendAssetChoicesLocal(ctx context.Context, arg stellar1.GetS
 // BuildPaymentCache has helpers for getting information quickly when building a payment.
 // Methods should err on the side of performance rather at the cost of serialization.
 type BuildPaymentCache interface {
-	OwnsAccount(context.Context, stellar1.AccountID) (bool, error)
+	OwnsAccount(libkb.MetaContext, stellar1.AccountID) (bool, error)
 	// AccountSeqno should be cached _but_ it should also be busted asap.
 	// Because it is used to prevent users from sending payments twice in a row.
-	AccountSeqno(context.Context, stellar1.AccountID) (string, error)
-	IsAccountFunded(context.Context, stellar1.AccountID) (bool, error)
+	AccountSeqno(libkb.MetaContext, stellar1.AccountID) (string, error)
+	IsAccountFunded(libkb.MetaContext, stellar1.AccountID) (bool, error)
 	// xxx Will delegating to stellar.LookupRecipient be too slow?
 	// Will it do identifies?
 	LookupRecipient(libkb.MetaContext, stellarcommon.RecipientInput) (res stellarcommon.Recipient, err error)
-	GetOutsideExchangeRate(context.Context, stellar1.OutsideCurrencyCode) (stellar1.OutsideExchangeRate, error)
+	GetOutsideExchangeRate(libkb.MetaContext, stellar1.OutsideCurrencyCode) (stellar1.OutsideExchangeRate, error)
+	AvailableXLMToSend(libkb.MetaContext, stellar1.AccountID) (string, error)
 }
 
 func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymentLocalArg) (res stellar1.BuildPaymentResLocal, err error) {
@@ -714,7 +714,7 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 		available bool
 		from      stellar1.AccountID
 	}{}
-	owns, err := bpc.OwnsAccount(ctx, arg.From)
+	owns, err := bpc.OwnsAccount(s.mctx(ctx), arg.From)
 	if err != nil || !owns {
 		s.G().Log.CDebugf(ctx, "UserOwnsAccount -> owns:%v err:%v", owns, err)
 		res.Banners = append(res.Banners, stellar1.SendBannerLocal{
@@ -728,7 +728,7 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 			fromInfo.available = true
 		} else {
 			// Check that the seqno of the account matches the caller's expectation.
-			seqno, err := bpc.AccountSeqno(ctx, arg.From)
+			seqno, err := bpc.AccountSeqno(s.mctx(ctx), arg.From)
 			switch {
 			case err != nil:
 				s.G().Log.CDebugf(ctx, "AccountSeqno -> err:%v", err)
@@ -786,7 +786,7 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 				minAmountXLM = "2.01"
 				addMinBanner(bannerThem, minAmountXLM)
 			} else {
-				isFunded, err := bpc.IsAccountFunded(ctx, stellar1.AccountID(recipient.AccountID.String()))
+				isFunded, err := bpc.IsAccountFunded(s.mctx(ctx), stellar1.AccountID(recipient.AccountID.String()))
 				if err != nil {
 					s.G().Log.CDebugf(ctx, "error checking recipient funding status %v: %v", *recipient.AccountID, err)
 				} else if !isFunded {
@@ -802,8 +802,8 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 
 	amountX := s.buildPaymentAmountHelper(ctx, buildPaymentAmountInput{
 		Amount:   arg.Amount,
-		Currency: amount.Currency,
-		Asset:    amount.Asset,
+		Currency: arg.Currency,
+		Asset:    arg.Asset,
 	})
 	res.WorthDescription = amountX.worthDescription
 	res.WorthInfo = amountX.worthInfo
@@ -817,18 +817,28 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 		if fromInfo.available {
 			// Check that the sender has enough asset available.
 			// Note: When adding support for sending non-XLM assets, check the asset instead of XLM here.
-			availableToSend, err := bpc.AvailableToSend()
+			availableToSendXLM, err := bpc.AvailableXLMToSend(s.mctx(ctx), fromInfo.from)
 			if err != nil {
 				s.G().Log.CDebugf(ctx, "error getting available balance", err)
 			} else {
-				cmp, err := stellar.CompareAmounts(availableToSend, amountX.amountOfAsset)
+				cmp, err := stellar.CompareAmounts(availableToSendXLM, amountX.amountOfAsset)
 				switch {
 				case err != nil:
 					s.G().Log.CDebugf(ctx, "error comparing amounts", err)
 				case cmp == -1:
 					// Send amount is more than the available to send.
-					res.AmountErrMsg = xxx()
-					readyChecklist.amount = false
+					readyChecklist.amount = false // block sending
+					res.AmountErrMsg = fmt.Sprintf("Your available to send is *%s XLM*", availableToSendXLM)
+					if arg.Currency != nil && amountX.rate != nil {
+						// If the user entered an amount in outside currency and an exchange
+						// rate is available, attempt to show them available balance in that currency.
+						availableToSendOutside, err := stellar.ConvertXLMToOutside(availableToSendXLM, *amountX.rate)
+						if err != nil {
+							s.G().Log.CDebugf(ctx, "error converting available to send", err)
+						} else {
+							res.AmountErrMsg = fmt.Sprintf("Your available to send is *%s %s*", availableToSendOutside, TODO())
+						}
+					}
 				default:
 				}
 			}
@@ -903,8 +913,8 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 type buildPaymentAmountInput struct {
 	// See buildPaymentLocal in avdl from which these args are copied.
 	Amount   string
-	Currency *OutsideCurrencyCode
-	Asset    *Asset
+	Currency *stellar1.OutsideCurrencyCode
+	Asset    *stellar1.Asset
 }
 
 type buildPaymentAmountOutput struct {
@@ -914,6 +924,8 @@ type buildPaymentAmountOutput struct {
 	amountErrMsg     string
 	worthDescription string
 	worthInfo        string
+	// Rate may be nil if there was an error fetching it.
+	rate *stellar1.OutsideExchangeRate
 }
 
 func (s *Server) buildPaymentAmountHelper(ctx context.Context, in buildPaymentAmountInput) (out buildPaymentAmountOutput) {

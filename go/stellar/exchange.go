@@ -51,13 +51,21 @@ func ConvertOutsideToXLM(outsideAmount string, rate stellar1.OutsideExchangeRate
 //   +1 if x >  y
 //
 func CompareAmounts(amount1, amount2 string) (int, error) {
-	amountx, err := stellaramount.ParseInt64(XLMAmount)
+	amountx, err := stellaramount.ParseInt64(amount1)
 	if err != nil {
 		return 0, err
 	}
-	amounty, err := stellaramount.ParseInt64(XLMAmount)
+	amounty, err := stellaramount.ParseInt64(amount2)
 	if err != nil {
 		return 0, err
+	}
+	switch {
+	case amountx < amounty:
+		return -1, nil
+	case amountx > amounty:
+		return 1, nil
+	default:
+		return 0, nil
 	}
 }
 
