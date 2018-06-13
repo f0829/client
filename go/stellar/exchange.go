@@ -43,6 +43,24 @@ func ConvertOutsideToXLM(outsideAmount string, rate stellar1.OutsideExchangeRate
 	return acc.FloatString(7), nil
 }
 
+// CompareAmounts compares amounts of stellar assets.
+// Returns:
+//
+//   -1 if x <  y
+//    0 if x == y
+//   +1 if x >  y
+//
+func CompareAmounts(amount1, amount2 string) (int, error) {
+	amountx, err := stellaramount.ParseInt64(XLMAmount)
+	if err != nil {
+		return 0, err
+	}
+	amounty, err := stellaramount.ParseInt64(XLMAmount)
+	if err != nil {
+		return 0, err
+	}
+}
+
 func parseExchangeRate(rate string) (*big.Rat, error) {
 	rateRat, err := parseDecimalStrict(rate)
 	if err != nil {

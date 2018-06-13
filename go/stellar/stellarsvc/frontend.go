@@ -17,7 +17,7 @@ import (
 	"github.com/keybase/client/go/stellar/relays"
 	"github.com/keybase/client/go/stellar/remote"
 	"github.com/keybase/client/go/stellar/stellarcommon"
-	stellaramount "github.com/stellar/go/amount"
+	"github.com/stellar/go/amount"
 )
 
 const WorthCurrencyErrorCode = "ERR"
@@ -675,6 +675,9 @@ type BuildPaymentCache interface {
 	// Because it is used to prevent users from sending payments twice in a row.
 	AccountSeqno(context.Context, stellar1.AccountID) (string, error)
 	IsAccountFunded(context.Context, stellar1.AccountID) (bool, error)
+	// xxx Will delegating to stellar.LookupRecipient be too slow?
+	// Will it do identifies?
+	LookupRecipient(libkb.MetaContext, stellarcommon.RecipientInput) (res stellarcommon.Recipient, err error)
 	GetOutsideExchangeRate(context.Context, stellar1.OutsideCurrencyCode) (stellar1.OutsideExchangeRate, error)
 }
 
@@ -761,8 +764,7 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 		}
 	}
 	if !skipRecipient {
-		// xxx Is this call too slow? Will it do identifies?
-		recipient, err := stellar.LookupRecipient(s.mctx(ctx).WithUIs(uis), stellarcommon.RecipientInput(arg.To))
+		recipient, err := bpc.LookupRecipient(s.mctx(ctx).WithUIs(uis), stellarcommon.RecipientInput(arg.To))
 		if err != nil {
 			s.G().Log.CDebugf(ctx, "error with recipient field %v: %v", arg.To, err)
 			res.ToErrMsg = "recipient not found"
@@ -798,55 +800,83 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 
 	// -------------------- amount + asset --------------------
 
-	var amountOfAsset string // can remain "" if validations fail
-	asset := stellar1.AssetNative()
+	amountX := s.buildPaymentAmountHelper(ctx, buildPaymentAmountInput{
+		Amount:   arg.Amount,
+		Currency: amount.Currency,
+		Asset:    amount.Asset,
+	})
+	res.WorthDescription = amountX.worthDescription
+	res.WorthInfo = amountX.worthInfo
 
-	if arg.Currency != nil && arg.Asset == nil {
-		// Amount is of currency.
-		if arg.Amount == "" {
-			FUDGE() // but still get exchange rate for 0!
-		}
-		_, err = stellaramount.ParseInt64(arg.Amount)
-		if err != nil {
-			FUDGE()
-		}
-		xrate, err := bpc.GetOutsideExchangeRate(*arg.Currency)
-		if err != nil {
-			s.G().Log.CDebugf(ctx, "error getting exchange rate for %v: %v", arg.Currency, err)
-			res.AmountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
-		} else {
-			xlmAmount, err := stellar.ConvertOutsideToXLM(arg.Amount, xrate)
-			if err != nil {
-				s.G().Log.CDebugf(ctx, "error getting converting: %v", err)
-				res.AmountErrMsg = fmt.Sprintf("Could not convert to XLM", arg.Currency.String())
-			} else {
-				amountOfAsset = xlmAmount
-				// xxx TODO you were here...
-			}
-		}
-		// xxx TODO branch
-	} else if arg.Currency == nil {
-		// Amount is of asset.
-		if arg.Asset != nil {
-			asset = *arg.Asset
-		}
-		// xxx TODO branch
-	} else {
-		// This is a caller error, so it's ok error out the whole RPC.
-		return res, fmt.Errorf("Only one of Asset and Currency parameters should be filled")
-	}
-
-	if haveAmount {
-		if !asset.IsNativeXLM() {
+	if amountX.haveAmount {
+		if !amountX.asset.IsNativeXLM() {
 			return res, fmt.Errorf("sending non-XLM assets is not supported")
 		}
-		// xxx TODO check that sender has enough asset
-		// xxx TODO check that recipient accepts asset
+		readyChecklist.amount = true
+
+		if fromInfo.available {
+			// Check that the sender has enough asset available.
+			// Note: When adding support for sending non-XLM assets, check the asset instead of XLM here.
+			availableToSend, err := bpc.AvailableToSend()
+			if err != nil {
+				s.G().Log.CDebugf(ctx, "error getting available balance", err)
+			} else {
+				cmp, err := stellar.CompareAmounts(availableToSend, amountX.amountOfAsset)
+				switch {
+				case err != nil:
+					s.G().Log.CDebugf(ctx, "error comparing amounts", err)
+				case cmp == -1:
+					// Send amount is more than the available to send.
+					res.AmountErrMsg = xxx()
+					readyChecklist.amount = false
+				default:
+				}
+			}
+		}
+
+		// Note: When adding support for sending non-XLM assets, check here that the recipient
+		//       accepts the asset.
 	}
-	// xxx TODO arg.Amount
-	// xxx TODO arg.Currency
-	// xxx TODO arg.Asset
-	// xxx TODO return worth
+
+	// var amountOfAsset string // can remain "" if validations fail
+	// asset := stellar1.AssetNative()
+
+	// if arg.Currency != nil && arg.Asset == nil {
+	// 	// Amount is of currency.
+	// 	if arg.Amount == "" {
+	// 		FUDGE() // but still get exchange rate for 0!
+	// 	}
+	// 	_, err := stellar.ParseDecimalStrict(arg.Amount)
+	// 	if err != nil {
+	// 		FUDGE()
+	// 	}
+	// 	xrate, err := bpc.GetOutsideExchangeRate(*arg.Currency)
+	// 	if err != nil {
+	// 		s.G().Log.CDebugf(ctx, "error getting exchange rate for %v: %v", arg.Currency, err)
+	// 		res.AmountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
+	// 	} else {
+	// 		xlmAmount, err := stellar.ConvertOutsideToXLM(arg.Amount, xrate)
+	// 		if err != nil {
+	// 			s.G().Log.CDebugf(ctx, "error getting converting: %v", err)
+	// 			res.AmountErrMsg = fmt.Sprintf("Could not convert to XLM", arg.Currency.String())
+	// 		} else {
+	// 			amountOfAsset = xlmAmount
+	// 			res.WorthDescription = fmt.Sprintf("This is *%s XLM*", xlmAmountFormatted)
+	// 			res.WorthInfo = fmt.Sprintf("$1 = %s\nSource: coinmarketcap.com", rateInvertFormatted)
+	// 			// xxx TODO you were here...
+	// 		}
+	// 	}
+	// 	// xxx TODO branch
+	// } else if arg.Currency == nil {
+	// 	// Amount is of asset.
+	// 	if arg.Asset != nil {
+	// 		asset = *arg.Asset
+	// 	}
+	// 	// xxx TODO branch
+	// } else {
+	// 	// This is a caller error, so it's ok error out the whole RPC.
+	// 	return res, fmt.Errorf("Only one of Asset and Currency parameters should be filled")
+	// }
 
 	// -------------------- note + memo --------------------
 
@@ -868,6 +898,26 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 		res.ReadyToSend = true
 	}
 	return res, nil
+}
+
+type buildPaymentAmountInput struct {
+	// See buildPaymentLocal in avdl from which these args are copied.
+	Amount   string
+	Currency *OutsideCurrencyCode
+	Asset    *Asset
+}
+
+type buildPaymentAmountOutput struct {
+	haveAmount       bool // whether `amountOfAsset` and `asset` are valid
+	amountOfAsset    string
+	asset            stellar1.Asset
+	amountErrMsg     string
+	worthDescription string
+	worthInfo        string
+}
+
+func (s *Server) buildPaymentAmountHelper(ctx context.Context, in buildPaymentAmountInput) (out buildPaymentAmountOutput) {
+	TODO()
 }
 
 func (s *Server) SendPaymentLocal(ctx context.Context, arg stellar1.SendPaymentLocalArg) (res stellar1.SendPaymentResLocal, err error) {
