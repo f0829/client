@@ -7,7 +7,7 @@ import (
 	"regexp"
 
 	"github.com/keybase/client/go/protocol/stellar1"
-	"github.com/stellar/go/amount"
+	stellaramount "github.com/stellar/go/amount"
 )
 
 // ConvertXLMToOutside converts an amount of lumens into an amount of outside currency.
@@ -18,11 +18,11 @@ func ConvertXLMToOutside(XLMAmount string, rate stellar1.OutsideExchangeRate) (o
 	if err != nil {
 		return "", err
 	}
-	amountInt64, err := amount.ParseInt64(XLMAmount)
+	amountInt64, err := stellaramount.ParseInt64(XLMAmount)
 	if err != nil {
 		return "", fmt.Errorf("parsing amount to convert: %q", err)
 	}
-	acc := big.NewRat(amountInt64, amount.One)
+	acc := big.NewRat(amountInt64, stellaramount.One)
 	acc.Mul(acc, rateRat)
 	return acc.FloatString(7), nil
 }

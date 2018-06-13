@@ -17,6 +17,7 @@ import (
 	"github.com/keybase/client/go/stellar/relays"
 	"github.com/keybase/client/go/stellar/remote"
 	"github.com/keybase/client/go/stellar/stellarcommon"
+	stellaramount "github.com/stellar/go/amount"
 )
 
 const WorthCurrencyErrorCode = "ERR"
@@ -666,6 +667,17 @@ func (s *Server) GetSendAssetChoicesLocal(ctx context.Context, arg stellar1.GetS
 	return res, fmt.Errorf("GetSendAssetChoicesLocal not implemented")
 }
 
+// BuildPaymentCache has helpers for getting information quickly when building a payment.
+// Methods should err on the side of performance rather at the cost of serialization.
+type BuildPaymentCache interface {
+	OwnsAccount(context.Context, stellar1.AccountID) (bool, error)
+	// AccountSeqno should be cached _but_ it should also be busted asap.
+	// Because it is used to prevent users from sending payments twice in a row.
+	AccountSeqno(context.Context, stellar1.AccountID) (string, error)
+	IsAccountFunded(context.Context, stellar1.AccountID) (bool, error)
+	GetOutsideExchangeRate(context.Context, stellar1.OutsideCurrencyCode) (stellar1.OutsideExchangeRate, error)
+}
+
 func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymentLocalArg) (res stellar1.BuildPaymentResLocal, err error) {
 	ctx, err, fin := s.Preamble(ctx, preambleArg{
 		RPCName:       "BuildPaymentLocal",
@@ -690,9 +702,18 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 
 	// -------------------- from --------------------
 
-	owns, err := UserOwnsAccountWickedFast(arg.From)
+	var bpc BuildPaymentCache
+	if bpc == nil {
+		return res, fmt.Errorf("BuildPaymentCache not implemented")
+	}
+
+	fromInfo := struct {
+		available bool
+		from      stellar1.AccountID
+	}{}
+	owns, err := bpc.OwnsAccount(ctx, arg.From)
 	if err != nil || !owns {
-		s.G().Log.CDebugf(ctx, "UserOwnsAccountWickedFast -> owns:%v err:%v", owns, err)
+		s.G().Log.CDebugf(ctx, "UserOwnsAccount -> owns:%v err:%v", owns, err)
 		res.Banners = append(res.Banners, stellar1.SendBannerLocal{
 			Level:   "error",
 			Message: "Could not find source account.",
@@ -700,30 +721,31 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 	} else {
 		if arg.FromSeqno == "" {
 			readyChecklist.from = true
+			fromInfo.from = arg.From
+			fromInfo.available = true
 		} else {
 			// Check that the seqno of the account matches the caller's expectation.
-			// xxx TODO the wicked fast portion of this should bust whenever there's a new tx.
-			seqno, err := AccountSeqnoWickedFast(arg.From)
+			seqno, err := bpc.AccountSeqno(ctx, arg.From)
 			switch {
 			case err != nil:
-				s.G().Log.CDebugf(ctx, "AccountSeqnoWickedFast -> err:%v", err)
+				s.G().Log.CDebugf(ctx, "AccountSeqno -> err:%v", err)
 				res.Banners = append(res.Banners, stellar1.SendBannerLocal{
 					Level:   "error",
 					Message: "Could not get seqno for source account.",
 				})
 			case seqno != arg.FromSeqno:
-				s.G().Log.CDebugf(ctx, "AccountSeqnoWickedFast -> err:%v", err)
+				s.G().Log.CDebugf(ctx, "AccountSeqno -> err:%v", err)
 				res.Banners = append(res.Banners, stellar1.SendBannerLocal{
 					Level:   "error",
 					Message: "Activity on account since initiating send. Take another look at account history.",
 				})
 			default:
 				readyChecklist.from = true
+				fromInfo.from = arg.From
+				fromInfo.available = true
 			}
 		}
 	}
-	// xxx TODO arg.From
-	// xxx TODO arg.FromSeqno
 
 	// -------------------- to --------------------
 
@@ -762,7 +784,7 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 				minAmountXLM = "2.01"
 				addMinBanner(bannerThem, minAmountXLM)
 			} else {
-				isFunded, err := stellar.IsAccountFundedFastAsCanBe(*recipient.AccountID)
+				isFunded, err := bpc.IsAccountFunded(ctx, stellar1.AccountID(recipient.AccountID.String()))
 				if err != nil {
 					s.G().Log.CDebugf(ctx, "error checking recipient funding status %v: %v", *recipient.AccountID, err)
 				} else if !isFunded {
@@ -777,7 +799,7 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 	// -------------------- amount + asset --------------------
 
 	var amountOfAsset string // can remain "" if validations fail
-	asset := stelar1.AssetNative()
+	asset := stellar1.AssetNative()
 
 	if arg.Currency != nil && arg.Asset == nil {
 		// Amount is of currency.
@@ -788,15 +810,15 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 		if err != nil {
 			FUDGE()
 		}
-		xrate, err := GetOutsideExchangeRateFast(*arg.Currency)
+		xrate, err := bpc.GetOutsideExchangeRate(*arg.Currency)
 		if err != nil {
 			s.G().Log.CDebugf(ctx, "error getting exchange rate for %v: %v", arg.Currency, err)
-			res.amountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
+			res.AmountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
 		} else {
-			xlmAmount, err := stellar.ConvertLocalToXLM(arg.Amount, xrate)
+			xlmAmount, err := stellar.ConvertOutsideToXLM(arg.Amount, xrate)
 			if err != nil {
 				s.G().Log.CDebugf(ctx, "error getting converting: %v", err)
-				res.amountErrMsg = fmt.Sprintf("Could not convert to XLM", arg.Currency.String())
+				res.AmountErrMsg = fmt.Sprintf("Could not convert to XLM", arg.Currency.String())
 			} else {
 				amountOfAsset = xlmAmount
 				// xxx TODO you were here...
