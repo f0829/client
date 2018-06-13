@@ -39,6 +39,8 @@ func printPayment(g *libkb.GlobalContext, p stellar1.PaymentCLILocal, verbose bo
 	case p.ToStellar != nil:
 		to = p.ToStellar.LossyAbbreviation()
 		showedAbbreviation = true
+	case p.ToAssertion != nil:
+		to = fmt.Sprintf("%q", *p.ToAssertion)
 	default:
 		// This should never happen
 		line("%v", ColorString(g, "red", "missing recipient info"))
