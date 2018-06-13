@@ -834,12 +834,18 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 						// rate is available, attempt to show them available balance in that currency.
 						availableToSendOutside, err := stellar.ConvertXLMToOutside(availableToSendXLM, *amountX.rate)
 						if err != nil {
-							s.G().Log.CDebugf(ctx, "error converting available to send", err)
+							s.G().Log.CDebugf(ctx, "error converting available-to-send", err)
 						} else {
-							res.AmountErrMsg = fmt.Sprintf("Your available to send is *%s %s*", availableToSendOutside, TODO())
+							formattedATS, err := stellar.FormatCurrency(ctx, s.G(), availableToSendOutside, amountX.rate.Currency)
+							if err != nil {
+								s.G().Log.CDebugf(ctx, "error formatting available-to-send", err)
+							} else {
+								res.AmountErrMsg = fmt.Sprintf("Your available to send is *%s*", formattedATS)
+							}
 						}
 					}
 				default:
+					// Welcome back. How was your stay at the error handling hotel?
 				}
 			}
 		}
