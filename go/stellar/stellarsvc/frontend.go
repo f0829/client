@@ -854,46 +854,6 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 		//       accepts the asset.
 	}
 
-	// var amountOfAsset string // can remain "" if validations fail
-	// asset := stellar1.AssetNative()
-
-	// if arg.Currency != nil && arg.Asset == nil {
-	// 	// Amount is of currency.
-	// 	if arg.Amount == "" {
-	// 		FUDGE() // but still get exchange rate for 0!
-	// 	}
-	// 	_, err := stellar.ParseDecimalStrict(arg.Amount)
-	// 	if err != nil {
-	// 		FUDGE()
-	// 	}
-	// 	xrate, err := bpc.GetOutsideExchangeRate(*arg.Currency)
-	// 	if err != nil {
-	// 		s.G().Log.CDebugf(ctx, "error getting exchange rate for %v: %v", arg.Currency, err)
-	// 		res.AmountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
-	// 	} else {
-	// 		xlmAmount, err := stellar.ConvertOutsideToXLM(arg.Amount, xrate)
-	// 		if err != nil {
-	// 			s.G().Log.CDebugf(ctx, "error getting converting: %v", err)
-	// 			res.AmountErrMsg = fmt.Sprintf("Could not convert to XLM", arg.Currency.String())
-	// 		} else {
-	// 			amountOfAsset = xlmAmount
-	// 			res.WorthDescription = fmt.Sprintf("This is *%s XLM*", xlmAmountFormatted)
-	// 			res.WorthInfo = fmt.Sprintf("$1 = %s\nSource: coinmarketcap.com", rateInvertFormatted)
-	// 			// xxx TODO you were here...
-	// 		}
-	// 	}
-	// 	// xxx TODO branch
-	// } else if arg.Currency == nil {
-	// 	// Amount is of asset.
-	// 	if arg.Asset != nil {
-	// 		asset = *arg.Asset
-	// 	}
-	// 	// xxx TODO branch
-	// } else {
-	// 	// This is a caller error, so it's ok error out the whole RPC.
-	// 	return res, fmt.Errorf("Only one of Asset and Currency parameters should be filled")
-	// }
-
 	// -------------------- note + memo --------------------
 
 	if len(arg.SecretNote) <= 500 {
@@ -935,7 +895,48 @@ type buildPaymentAmountOutput struct {
 }
 
 func (s *Server) buildPaymentAmountHelper(ctx context.Context, in buildPaymentAmountInput) (out buildPaymentAmountOutput) {
+	stellar.ParseDecimalStrict
 	TODO()
+
+	var amountOfAsset string // can remain "" if validations fail
+	asset := stellar1.AssetNative()
+
+	if arg.Currency != nil && arg.Asset == nil {
+		// Amount is of currency.
+		if arg.Amount == "" {
+			FUDGE() // but still get exchange rate for 0!
+		}
+		_, err := stellar.ParseDecimalStrict(arg.Amount)
+		if err != nil {
+			FUDGE()
+		}
+		xrate, err := bpc.GetOutsideExchangeRate(*arg.Currency)
+		if err != nil {
+			s.G().Log.CDebugf(ctx, "error getting exchange rate for %v: %v", arg.Currency, err)
+			res.AmountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
+		} else {
+			xlmAmount, err := stellar.ConvertOutsideToXLM(arg.Amount, xrate)
+			if err != nil {
+				s.G().Log.CDebugf(ctx, "error getting converting: %v", err)
+				res.AmountErrMsg = fmt.Sprintf("Could not convert to XLM", arg.Currency.String())
+			} else {
+				amountOfAsset = xlmAmount
+				res.WorthDescription = fmt.Sprintf("This is *%s XLM*", xlmAmountFormatted)
+				res.WorthInfo = fmt.Sprintf("$1 = %s\nSource: coinmarketcap.com", rateInvertFormatted)
+				// xxx TODO you were here...
+			}
+		}
+		// xxx TODO branch
+	} else if arg.Currency == nil {
+		// Amount is of asset.
+		if arg.Asset != nil {
+			asset = *arg.Asset
+		}
+		// xxx TODO branch
+	} else {
+		// This is a caller error, so it's ok error out the whole RPC.
+		return res, fmt.Errorf("Only one of Asset and Currency parameters should be filled")
+	}
 }
 
 func (s *Server) SendPaymentLocal(ctx context.Context, arg stellar1.SendPaymentLocalArg) (res stellar1.SendPaymentResLocal, err error) {
